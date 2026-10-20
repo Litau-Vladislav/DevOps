@@ -3,9 +3,9 @@
 ARG PLAYWRIGHT_VERSION=1.64.0
 
 # --------------------------------------------------
-# Stage 1: системное окружение для Chromium
+# Stage 1: Базовое окружение + Системные зависимости
 # --------------------------------------------------
-FROM node:22-bookworm AS os-deps
+FROM node:22-bookworm AS base
 
 ARG PLAYWRIGHT_VERSION
 
@@ -14,63 +14,64 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
     PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 
-# Устанавливаем Python и инструменты для создания venv.
+WORKDIR /app
+
+# 1. Устанавливаем Python, curl и очищаем кэш
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         python3 \
         python3-venv \
         ca-certificates \
+        curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Берём только исполняемые файлы uv из официального образа uv.
-# Готовый образ Playwright не используется.
-COPY --from=ghcr.io/astral-sh/uv:0.13.1 /uv /uvx /bin/
+# 2. Устанавливаем uv через официальный скрипт (обход проблем с ghcr.io)
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh
+ENV PATH="/root/.local/bin:${PATH}"
 
-# Устанавливаем системные библиотеки, необходимые Chromium.
-# uvx временно запускает Playwright нужной версии.
-RUN uvx --from "playwright==${PLAYWRIGHT_VERSION}" \
-        playwright install-deps chromium \
-    && rm -f /bin/uv /bin/uvx \
-    && rm -rf /root/.cache/uv /tmp/*
+# 3. Устанавливаем системные библиотеки для Chromium.
+# Это ДОЛЖНО быть в base, чтобы они попали в финальный образ runtime!
+RUN uvx --from "playwright==${PLAYWRIGHT_VERSION}" playwright install-deps chromium
 
 # --------------------------------------------------
-# Stage 2: Python-зависимости и браузер
+# Stage 2: Только скачивание бинарного файла браузера
 # --------------------------------------------------
-FROM os-deps AS browser
+# Наследуется от base (где уже есть системные библиотеки)
+FROM base AS browser
 
-# uv нужен на этапе сборки, но не в финальном образе.
-COPY --from=ghcr.io/astral-sh/uv:0.13.1 /uv /uvx /bin/
+ARG PLAYWRIGHT_VERSION
+
+# Скачиваем сам браузер. Эта стадия кешируется отдельно от Python-зависимостей.
+RUN uvx --from "playwright==${PLAYWRIGHT_VERSION}" playwright install chromium
+
+# --------------------------------------------------
+# Stage 3: Только Python-зависимости
+# --------------------------------------------------
+# Наследуется от base. Строится параллельно со стадией browser.
+FROM base AS deps
 
 ENV UV_LINK_MODE=copy
 
-WORKDIR /app
-
-# Сначала копируем только описание зависимостей.
 COPY pyproject.toml uv.lock ./
 
-# Устанавливаем зависимости из lock-файла.
-# Кешируем загрузки пакетов между сборками.
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --locked --no-install-project --no-dev
 
-# Устанавливаем Chromium отдельно от исходного кода.
-RUN uv run --no-sync playwright install chromium
-
 # --------------------------------------------------
-# Stage 3: финальный образ приложения
+# Stage 4: Финальный образ (runtime)
 # --------------------------------------------------
-FROM os-deps AS runtime
-
-WORKDIR /app
+# Наследуется от base (имеет Python + системные библиотеки для Chromium)
+FROM base AS runtime
 
 ENV PATH="/app/.venv/bin:${PATH}"
 
-# Переносим только готовое Python-окружение и браузер.
-COPY --from=browser /app/.venv /app/.venv
+# Забираем скачанный браузер из стадии browser
 COPY --from=browser /ms-playwright /ms-playwright
 
-# Код копируем последним, чтобы его изменения
-# не инвалидировали слои установки зависимостей и браузера.
+# Забираем готовое Python-окружение из стадии deps
+COPY --from=deps /app/.venv /app/.venv
+
+# Код копируем последним для максимального кеширования
 COPY src/ ./src/
 
 CMD ["/app/.venv/bin/python", "-u", "src/scraper.py"]
