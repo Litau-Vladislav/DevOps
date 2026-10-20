@@ -25,12 +25,12 @@ RUN apt-get update \
         curl \
     && rm -rf /var/lib/apt/lists/*
 
-# 2. Устанавливаем uv через официальный скрипт (обход проблем с ghcr.io)
+# 2. Устанавливаем uv
 RUN curl -LsSf https://astral.sh/uv/install.sh | sh
 ENV PATH="/root/.local/bin:${PATH}"
 
 # 3. Устанавливаем системные библиотеки для Chromium.
-# Это ДОЛЖНО быть в base, чтобы они попали в финальный образ runtime!
+# Это должно быть в base, чтобы они попали в финальный образ runtime
 RUN uvx --from "playwright==${PLAYWRIGHT_VERSION}" playwright install-deps chromium
 
 # --------------------------------------------------
@@ -40,7 +40,7 @@ RUN uvx --from "playwright==${PLAYWRIGHT_VERSION}" playwright install-deps chrom
 FROM base AS browser
 
 ARG PLAYWRIGHT_VERSION
-
+ENV PLAYWRIGHT_DOWNLOAD_HOST=https://npmmirror.com/mirrors/playwright/
 # Скачиваем сам браузер. Эта стадия кешируется отдельно от Python-зависимостей.
 RUN uvx --from "playwright==${PLAYWRIGHT_VERSION}" playwright install chromium
 
